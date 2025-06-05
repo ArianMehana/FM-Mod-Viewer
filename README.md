@@ -1,0 +1,4 @@
+-This file is supposed to help modders apply several patches to their mod at once.
+-This file is also supposed to help players or modders view the data of their mods such as cards, opponents, drops, decks and more.
+-In the future, I would like to load images and make parts of the mod editable so people can use this tool to create mods
+-I would also like to port this tool to android so people without a pc don't have to be forced to pay for similar apps or be unable to view mod data just because it has not been published in webpages like TEA
