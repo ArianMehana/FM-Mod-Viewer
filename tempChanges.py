@@ -3,6 +3,7 @@ from tkinter import filedialog, messagebox, ttk
 import os
 import binascii
 import traceback
+import re
 from PIL import Image, ImageTk
 
 
@@ -10,17 +11,19 @@ class YGOISOPatcher:
     def __init__(self, root):
         self.root = root
         self.root.title("YGO ISO Patcher")
-        self.iso_path = None
-        self.wamrg_path = None
-        self.slus_path = None
-        self.applied_patches = []
+        self.iso_path = None # Path to the selected ISO/BIN file
+        self.wamrg_path = None # Path to WAMRG.MRG or WAMRG.DAT
+        self.slus_path = None # Path to SLUS_014.11
+        self.applied_patches = [] # List to track applied patches
         self.selected_opponent = tk.StringVar()
-        self.opponent_data = {}
-        self.card_names = {}
-        self.card_descriptions = {}
+        self.opponent_data = {} # Maps opponent_id to (name, sa_pow_drops, bcd_drops, sa_tec_drops)
+        self.card_names = {} # Maps card_id to name
+        self.card_descriptions = {} # Maps card_id to description
         self.card_stats = {}  # Placeholder for ATK/DEF
         self.card_droppers = {}  # Maps card_id to list of opponents who drop it
         self.card_passwords_and_costs = {}  # Maps card_id to (password, cost)
+        self.card_to_equips = {} # Maps card_id to list of equip cards
+        self.force_apply = tk.BooleanVar(value=False)
         self.search_terms = {
             "deck": "",
             "sa_pow": "",
@@ -54,6 +57,11 @@ class YGOISOPatcher:
         self.card_images = {}
         self.photo_references = []
         self.total_cards = 722
+        self.drop_rate_addresses = {
+            '1D00D7': '6500',  # Default: 100 cards
+            '0C00D7': '6500',  # Default: 100 cards
+            '0200D7': '6400'   # Default: 100 cards
+        }
         self.drop_chances = {
             1: 0, 2: 100, 3: 0, 4: 100, 5: 48
         }
@@ -93,6 +101,40 @@ class YGOISOPatcher:
             "card_desc_text_base": 0x1B0800,
         }
 
+        #Drop rate changer
+        self.drop_rate_patches = [
+            {'original': bytes.fromhex("1B001D3C00AC"), 'modified': bytes.fromhex("1E801D3C00C0"), 'patch_name': 'Drop Rate (1B001D3C00AC)'},
+            {'original': bytes.fromhex("A32000B693"), 'modified': bytes.fromhex("A72000B697"), 'patch_name': 'Drop Rate (A32000B693)'},
+            {'original': bytes.fromhex("A32000B6A3"), 'modified': bytes.fromhex("A72000B6A7"), 'patch_name': 'Drop Rate (A32000B6A3)'},
+            {'original': bytes.fromhex("1B80043C00AC"), 'modified': bytes.fromhex("1E80043C00C0"), 'patch_name': 'Drop Rate (1B80043C00AC)'},
+            {'original': bytes.fromhex("A220005692"), 'modified': bytes.fromhex("A620005696"), 'patch_name': 'Drop Rate (A220005692)'},
+            {'original': bytes.fromhex("A2200056A2"), 'modified': bytes.fromhex("A6200056A6"), 'patch_name': 'Drop Rate (A2200056A2)'},
+            {'original': bytes.fromhex("1B80023C00AC"), 'modified': bytes.fromhex("1E80023C00C0"), 'patch_name': 'Drop Rate (1B80023C00AC)'},
+            {'original': bytes.fromhex("90000000000100D626"), 'modified': bytes.fromhex("94000000000100D626"), 'patch_name': 'Drop Rate (90000000000100D626)'},
+            {'original': bytes.fromhex("A0200056A0"), 'modified': bytes.fromhex("A4200056A4"), 'patch_name': 'Drop Rate (A0200056A0)'}
+        ]
+
+
+        #Other patches
+        self.starchips_patches = [
+            {'address': 0xB410, 'modified': bytes.fromhex("98FF060801004224")},
+            {'address': 0x1B0660, 'modified': bytes.fromhex(
+                "04004B2C1000601500000000FFFF42241D800C3CE0078C2500008D8D0000000A00AD250F000B3C3F426B3500008DAD000000002B686D010200A01100000000008BAD00000C2400000D2400000B24000062A02D860008")},
+        ]
+        self.password_patch = {
+            'address': 0x191E7B0,  # 16504544
+            'modified': bytes.fromhex("BEA90508")
+        }
+        self.win_patches = [
+            {'original': bytes.fromhex("900106242A38C5000300E010"), 'modified': bytes.fromhex("900106242A38C50000000000")},
+            {'original': bytes.fromhex("B80B06242A38C5000300E010"), 'modified': bytes.fromhex("B80B06242A38C50000000000")}
+        ]
+        self.exodia_patches = [
+            {'original': bytes.fromhex("28000224230062"), 'modified': bytes.fromhex("81FF0224230062")},
+            {'original': bytes.fromhex("28000324FF00"), 'modified': bytes.fromhex("81FF0324FF00")},
+            {'original': bytes.fromhex("28000224020062"), 'modified': bytes.fromhex("81FF0224020062")}
+        ]
+        self.applied_patches = []
         # Card image mappings
         self.card_image_map = {
             "magic": "Image_Card_Magic_Small",
@@ -145,6 +187,8 @@ class YGOISOPatcher:
         self.iso_display.pack()
         self.select_iso_button = tk.Button(self.root, text="Select ISO File", command=self.select_iso)
         self.select_iso_button.pack()
+        self.status_label = tk.Label(self.root, text="Ready", wraplength=300)
+        self.status_label.pack(pady=10)
 
         self.slus_label = tk.Label(self.root, text="Select SLUS File (SLUS_014.11):")
         self.slus_label.pack()
@@ -165,6 +209,8 @@ class YGOISOPatcher:
 
         self.view_button = tk.Button(self.root, text="View Data", command=self.show_view_data_interface, bg="#C0C0C0", fg="#000000")
         self.view_button.pack(pady=10)
+
+       
 
     def select_iso(self):
         self.iso_path = filedialog.askopenfilename(filetypes=[("ISO/BIN files", "*.iso *.bin")])
@@ -208,6 +254,7 @@ class YGOISOPatcher:
             try:
                 self.precompute_card_droppers()
                 self.load_card_passwords_and_costs()
+                self.card_to_equips = self.reverse_lookup_equips(self.wamrg_path)
                 self.view_button.config(bg="#0000FF", fg="white" if self.slus_path else "#000000")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load WAMRG data: {e}")
@@ -217,6 +264,309 @@ class YGOISOPatcher:
 
     def extract_files(self):
         pass
+
+    
+    def check_overlap(self, iso_data, change):
+        original_bytes = change['original']
+        modified_bytes = change['modified']
+        modified_pos = iso_data.find(modified_bytes)
+        original_pos = iso_data.find(original_bytes)
+        is_applied = modified_pos != -1 and original_pos == -1
+        return is_applied, original_bytes
+
+    def check_overlap_address(self, iso_data, change):
+        address = change['address']
+        modified_bytes = change['modified']
+        if address + len(modified_bytes) <= len(iso_data):
+            current_bytes = iso_data[address:address + len(modified_bytes)]
+            is_applied = current_bytes == modified_bytes
+            return is_applied, current_bytes
+        return False, None
+
+    def parse_drop_rate_changes(self, iso_data):
+        if not self.patch_vars['drop_rate'].get():
+            return []
+        changes = []
+        # Determine which value to use for the "Drop Rate (0200D7)", "Drop Rate (1D00D7)", and "Drop Rate (0C00D7)" patches based on user selection
+        # Assume self.drop_rate_var exists and is set to "100" or "1000"
+        drop_rate_0200D7_value = "640017240200D712"  # default for 100
+        drop_rate_1D00D7_value = "650017241D00D7"    # default for 100
+        drop_rate_0C00D7_value = "650017240C00D7"    # default for 100
+        if hasattr(self, "drop_rate_var") and self.drop_rate_var.get() == "1000":
+            drop_rate_0200D7_value = "e80317240200d712"
+            drop_rate_1D00D7_value = "e90317241D00D7"
+            drop_rate_0C00D7_value = "e90317240C00D7"
+
+        static_patches = [
+            {'original': bytes.fromhex("1B001D3C00AC"), 'modified': bytes.fromhex("1E801D3C00C0"), 'patch_name': 'Drop Rate (1B001D3C00AC)'},
+            {'original': bytes.fromhex("A32000B693"), 'modified': bytes.fromhex("A72000B697"), 'patch_name': 'Drop Rate (A32000B693)'},
+            {'original': bytes.fromhex("100017241D00D7"), 'modified': bytes.fromhex(drop_rate_1D00D7_value), 'patch_name': 'Drop Rate (1D00D7)', 'address_key': '1D00D7'},
+            {'original': bytes.fromhex("A32000B6A3"), 'modified': bytes.fromhex("A72000B6A7"), 'patch_name': 'Drop Rate (A32000B6A3)'},
+            {'original': bytes.fromhex("1B80043C00AC"), 'modified': bytes.fromhex("1E80043C00C0"), 'patch_name': 'Drop Rate (1B80043C00AC)'},
+            {'original': bytes.fromhex("A220005692"), 'modified': bytes.fromhex("A620005696"), 'patch_name': 'Drop Rate (A220005692)'},
+            {'original': bytes.fromhex("100017240C00D7"), 'modified': bytes.fromhex(drop_rate_0C00D7_value), 'patch_name': 'Drop Rate (0C00D7)', 'address_key': '0C00D7'},
+            {'original': bytes.fromhex("A2200056A2"), 'modified': bytes.fromhex("A6200056A6"), 'patch_name': 'Drop Rate (A2200056A2)'},
+            {'original': bytes.fromhex("1B80023C00AC"), 'modified': bytes.fromhex("1E80023C00C0"), 'patch_name': 'Drop Rate (1B80023C00AC)'},
+            {'original': bytes.fromhex("90000000000100D626"), 'modified': bytes.fromhex("94000000000100D626"), 'patch_name': 'Drop Rate (90000000000100D626)'},
+            # Use the dynamic value for the "Drop Rate (0200D7)" patch
+            {'original': bytes.fromhex("0F0017240200D712"), 'modified': bytes.fromhex(drop_rate_0200D7_value), 'patch_name': 'Drop Rate (0200D7)', 'address_key': '0200D7'},
+            {'original': bytes.fromhex("A0200056A0"), 'modified': bytes.fromhex("A4200056A4"), 'patch_name': 'Drop Rate (A0200056A0)'}
+        ]
+
+        for patch in static_patches:
+            offset = 0
+            while True:
+                offset = iso_data.find(patch['original'], offset)
+                if offset == -1:
+                    break
+                change = {
+                    'original': patch['original'],
+                    'modified': patch['modified'],
+                    'patch_name': patch['patch_name']
+                }
+                is_applied, _ = self.check_overlap(iso_data, change)
+                if is_applied and not self.force_apply.get():
+                    print(f"Patch {patch['patch_name']} already applied: {patch['modified'].hex().upper()}")
+                else:
+                    changes.append(change)
+                offset += len(patch['original'])
+        return changes
+
+    def parse_starchips_patches(self, iso_data):
+        if not self.patch_vars['starchips'].get():
+            return []
+        changes = []
+        for patch in self.starchips_patches:
+            change = {
+                'address': patch['address'],
+                'modified': patch['modified'],
+                'patch_name': f'Starchips at {hex(patch["address"])}'
+            }
+            is_applied, current_bytes = self.check_overlap_address(iso_data, change)
+            if is_applied and not self.force_apply.get():
+                print(f"Starchips patch already applied at {hex(patch['address'])} "
+                      f"(current: {current_bytes.hex().upper()})")
+            else:
+                if current_bytes:
+                    print(f"Starchips patch at {hex(patch['address'])}: "
+                          f"Current bytes {current_bytes.hex().upper()}, "
+                          f"Applying {patch['modified'].hex().upper()}")
+                changes.append(change)
+        return changes
+
+    def parse_password_patch(self, iso_data):
+        if not self.patch_vars['password'].get():
+            return []
+        change = {
+            'address': self.password_patch['address'],
+            'modified': self.password_patch['modified'],
+            'patch_name': 'No Password Limit'
+        }
+        is_applied, current_bytes = self.check_overlap_address(iso_data, change)
+        if is_applied and not self.force_apply.get():
+            print(f"No Password Limit patch already applied at {hex(change['address'])} "
+                  f"(current: {current_bytes.hex().upper()})")
+        else:
+            if current_bytes:
+                print(f"No Password Limit at {hex(change['address'])}: "
+                      f"Current bytes {current_bytes.hex().upper()}, "
+                      f"Applying {change['modified'].hex().upper()}")
+        return [change]
+
+    def parse_win_patches(self, iso_data):
+        if not self.patch_vars['win_requirements'].get():
+            return []
+        changes = []
+        for patch in self.win_patches:
+            change = {
+                'original': patch['original'],
+                'modified': patch['modified'],
+                'patch_name': 'Win Requirements'
+            }
+            is_applied, _ = self.check_overlap(iso_data, change)
+            if is_applied and not self.force_apply.get():
+                print(f"Win Requirements patch ({patch['modified'].hex()[:8]}) already applied")
+            else:
+                changes.append(change)
+        return changes
+
+    def parse_exodia_patches(self, iso_data):
+        if not self.patch_vars['exodia'].get():
+            return []
+        changes = []
+        for patch in self.exodia_patches:
+            change = {
+                'original': patch['original'],
+                'modified': patch['modified'],
+                'patch_name': 'Exodia S-Tec'
+            }
+            is_applied, _ = self.check_overlap(iso_data, change)
+            if is_applied and not self.force_apply.get():
+                print(f"Exodia S-Tec patch ({patch['modified'].hex()[:8]}) already applied")
+            else:
+                changes.append(change)
+        return changes
+
+    def check_and_patch_iso(self):
+        if not self.iso_path or not os.path.exists(self.iso_path):
+            messagebox.showerror("Error", "Please select a valid ISO/BIN file.")
+            return
+
+        if not any(self.patch_vars[key].get() for key in self.patch_vars):
+            messagebox.showerror("Error", "Please select at least one patch to apply.")
+            return
+
+        with open(self.iso_path, 'rb') as f:
+            iso_data = bytearray(f.read())
+
+        self.status_label.config(text="Checking patches...")
+        self.root.update()
+
+        changes = []
+        status_messages = []
+        patch_key_map = {
+            'Drop Rate': 'drop_rate',
+            'Starchips': 'starchips',
+            'No Password Limit': 'password',
+            'Win Requirements': 'win_requirements',
+            'Exodia S-Tec': 'exodia',
+        }
+
+        for parse_func, patch_name in [
+            (self.parse_drop_rate_changes, "Drop Rate"),
+            (self.parse_starchips_patches, "Starchips"),
+            (self.parse_password_patch, "No Password Limit"),
+            (self.parse_win_patches, "Win Requirements"),
+            (self.parse_exodia_patches, "Exodia S-Tec"),
+        ]:
+            patch_key = patch_key_map[patch_name]
+            if self.patch_vars[patch_key].get():
+                patch_changes = parse_func(iso_data)
+                if not patch_changes:
+                    status_messages.append(f"{patch_name}: Already applied or skipped")
+                else:
+                    status_messages.append(f"{patch_name}: Ready to apply {len(patch_changes)} changes")
+                    changes.extend(patch_changes)
+
+        self.status_label.config(text="\n".join(status_messages))
+        self.root.update()
+
+        if not changes:
+            messagebox.showinfo("Info", "No patches need to be applied.")
+            return
+
+        self.applied_patches = []
+        output_file_path = os.path.splitext(self.iso_path)[0] + "_Patched" + os.path.splitext(self.iso_path)[1]
+
+        self.status_label.config(text="Patching file...")
+        self.root.update()
+
+        for change in changes:
+            if 'address' in change:
+                address = change['address']
+                modified_bytes = change['modified']
+                if address + len(modified_bytes) <= len(iso_data):
+                    original_bytes = iso_data[address:address + len(modified_bytes)]
+                    iso_data[address:address + len(modified_bytes)] = modified_bytes
+                    self.applied_patches.append({
+                        'type': 'address',
+                        'address': address,
+                        'original': original_bytes,
+                        'modified': modified_bytes,
+                        'patch_name': change['patch_name']
+                    })
+                    print(f"Patched {change['patch_name']} at {hex(address)}: {modified_bytes.hex().upper()}")
+                    self.status_label.config(text=f"Patched {change['patch_name']} at {hex(address)}")
+                else:
+                    print(f"Error: Address {hex(address)} out of range for {change['patch_name']}")
+                    messagebox.showerror("Error", f"Address {hex(address)} out of range.")
+            else:
+                original_bytes = change['original']
+                modified_bytes = change['modified']
+                count = 0
+                offset = 0
+                while True:
+                    offset = iso_data.find(original_bytes, offset)
+                    if offset == -1:
+                        break
+                    original_region = iso_data[offset:offset + len(original_bytes)]
+                    iso_data[offset:offset + len(original_bytes)] = modified_bytes[:len(original_bytes)]
+                    self.applied_patches.append({
+                        'type': 'search',
+                        'offset': offset,
+                        'original': original_region,
+                        'modified': modified_bytes[:len(original_bytes)],
+                        'patch_name': change['patch_name']
+                    })
+                    print(f"Patched {change['patch_name']} at {hex(offset)}: {modified_bytes.hex().upper()}")
+                    count += 1
+                    offset += len(original_bytes)
+                if count == 0:
+                    print(f"Warning: No matches found for {original_bytes.hex().upper()} in {change['patch_name']}")
+                    self.status_label.config(text=f"No matches for {change['patch_name']}")
+                else:
+                    self.status_label.config(text=f"Applied {count} {change['patch_name']} patch(es)")
+                self.root.update()
+
+        with open(output_file_path, 'wb') as f:
+            f.write(iso_data)
+
+        self.status_label.config(text=f"Patched file saved to {output_file_path}")
+        messagebox.showinfo("Success", f"Patched file saved to {output_file_path}")
+
+    def reverse_patches(self):
+        if not self.iso_path or not os.path.exists(self.iso_path):
+            messagebox.showerror("Error", "Please select a valid ISO/BIN file.")
+            return
+        
+        if not self.applied_patches:
+            messagebox.showerror("Error", "No patches have been applied to reverse.")
+            return
+        
+        reverse_window = tk.Toplevel(self.root)
+        reverse_window.title("Reverse Patches")
+        tk.Label(reverse_window, text="Select Patches to Reverse:", font=("Arial", 12)).pack(pady=10)
+        
+        reverse_vars = {}
+        patch_names = sorted(set(patch['patch_name'] for patch in self.applied_patches))
+        for name in patch_names:
+            reverse_vars[name] = tk.BooleanVar(value=False)
+            tk.Checkbutton(reverse_window, text=name, variable=reverse_vars[name]).pack(anchor='w', padx=10)
+        
+        def apply_reversal():
+            with open(self.iso_path, 'rb') as f:
+                iso_data = bytearray(f.read())
+            
+            reversed_count = 0
+            for patch in self.applied_patches:
+                if reverse_vars[patch['patch_name']].get():
+                    if patch['type'] == 'address':
+                        address = patch['address']
+                        original_bytes = patch['original']
+                        if address + len(original_bytes) <= len(iso_data):
+                            iso_data[address:address + len(original_bytes)] = original_bytes
+                            print(f"Reversed {patch['patch_name']} at {hex(address)}")
+                            reversed_count += 1
+                    else:
+                        offset = patch['offset']
+                        original_bytes = patch['original']
+                        if offset + len(original_bytes) <= len(iso_data):
+                            iso_data[offset:offset + len(original_bytes)] = original_bytes
+                            print(f"Reversed {patch['patch_name']} at {hex(offset)}")
+                            reversed_count += 1
+                    self.root.update()
+            
+            output_file_path = os.path.splitext(self.iso_path)[0] + "_Reversed" + os.path.splitext(self.iso_path)[1]
+            with open(output_file_path, 'wb') as f:
+                f.write(iso_data)
+            
+            self.status_label.config(text=f"Reversed file saved to {output_file_path}")
+            messagebox.showinfo("Success", f"Reversed {reversed_count} patch(es).")
+            reverse_window.destroy()
+        
+        tk.Button(reverse_window, text="Apply Reversal", command=apply_reversal, bg="blue", fg="white").pack(pady=20)
+    
+
 
     def load_type_guardian_star_names(self, slus_data):
         """Load Type and Guardian Star names using pointers at 0x1C6600."""
@@ -237,7 +587,7 @@ class YGOISOPatcher:
 
             pointer_value = int.from_bytes(slus_data[pointer_offset:pointer_offset + 2], 'little')
             text_offset = text_base + pointer_value
-            print(f"Type {type_id}: Pointer offset = {hex(pointer_offset)}, Pointer value = {hex(pointer_value)}, Text offset = {hex(text_offset)}")
+            #print(f"Type {type_id}: Pointer offset = {hex(pointer_offset)}, Pointer value = {hex(pointer_value)}, Text offset = {hex(text_offset)}")
 
             # Read the name at the text offset, skipping multiple 0xF8 prefixes if present
             name = ""
@@ -248,7 +598,7 @@ class YGOISOPatcher:
                         break
                     byte = slus_data[text_offset + i]
                     if byte == 0xFF:
-                        print(f"Found FF terminator at {hex(text_offset + i)} for type {type_id}")
+                        #print(f"Found FF terminator at {hex(text_offset + i)} for type {type_id}")
                         break
                     elif byte == 0xF8 and i + 2 < max_length and text_offset + i + 2 < len(slus_data):
                         i += 3  # Skip 0xF8 and next 2 bytes
@@ -262,12 +612,12 @@ class YGOISOPatcher:
 
             name = name.strip().title() if name else f"Unknown Type {type_id}"
             self.card_types_map[type_id] = name
-            print(f"Type {type_id}: {name} at offset {hex(text_offset)}")
+            #print(f"Type {type_id}: {name} at offset {hex(text_offset)}")
 
         # Load Guardian Stars with multiple 0xF8 prefix handling
         self.guardian_stars_map = {}
         pointer_base += num_type_pointers * 2  # Move to Guardian Star pointers
-        print(f"Loading Guardian Star names using pointers at {hex(pointer_base)}")
+        #print(f"Loading Guardian Star names using pointers at {hex(pointer_base)}")
         for gs_id in range(num_guardian_star_pointers):
             pointer_offset = pointer_base + (gs_id * 2)
             if pointer_offset + 2 > len(slus_data):
@@ -276,7 +626,7 @@ class YGOISOPatcher:
 
             pointer_value = int.from_bytes(slus_data[pointer_offset:pointer_offset + 2], 'little')
             text_offset = text_base + pointer_value
-            print(f"Guardian Star {gs_id}: Pointer offset = {hex(pointer_offset)}, Pointer value = {hex(pointer_value)}, Text offset = {hex(text_offset)}")
+            #print(f"Guardian Star {gs_id}: Pointer offset = {hex(pointer_offset)}, Pointer value = {hex(pointer_value)}, Text offset = {hex(text_offset)}")
 
             # Read the name at the text offset, skipping multiple 0xF8 prefixes if present
             name = ""
@@ -287,7 +637,7 @@ class YGOISOPatcher:
                         break
                     byte = slus_data[text_offset + i]
                     if byte == 0xFF:
-                        print(f"Found FF terminator at {hex(text_offset + i)} for guardian star {gs_id}")
+                        #print(f"Found FF terminator at {hex(text_offset + i)} for guardian star {gs_id}")
                         break
                     elif byte == 0xF8 and i + 2 < max_length and text_offset + i + 2 < len(slus_data):
                         i += 3  # Skip 0xF8 and next 2 bytes
@@ -301,7 +651,7 @@ class YGOISOPatcher:
 
             name = name.strip().title() if name else f"Unknown Guardian Star {gs_id}"
             self.guardian_stars_map[gs_id + 1] = name  # Shifted IDs (1-10)
-            print(f"Guardian Star {gs_id}: {name} at offset {hex(text_offset)}")
+            #print(f"Guardian Star {gs_id}: {name} at offset {hex(text_offset)}")
 
         pointer_base += num_guardian_star_pointers * 2
         print(f"Skipping unused pointers at {hex(pointer_base)} (6 bytes)")
@@ -360,12 +710,13 @@ class YGOISOPatcher:
         print(f"Loaded {len(self.card_names)} card names from SLUS file")
 
     def load_card_descriptions(self, slus_data):
+        """Load card descriptions from SLUS data using pointers."""
         self.card_descriptions.clear()
         pointer_base = self.game_info_offsets["card_desc_pointers_start"]
         text_base = self.game_info_offsets["card_desc_text_base"]
         max_length = 200
 
-        print(f"Using pointer base: {hex(pointer_base)}, text base: {hex(text_base)}")
+        #print(f"Using pointer base: {hex(pointer_base)}, text base: {hex(text_base)}")
         card_id = 1
         pointer_offset = 2  # Start at 0x1B0A02
 
@@ -377,24 +728,38 @@ class YGOISOPatcher:
             pointer_bytes = slus_data[idx:idx + 2]
             pointer_little = int.from_bytes(pointer_bytes, 'little')
             pointer_big = int.from_bytes(pointer_bytes, 'big')
-            #print(f"Card {card_id} description pointer bytes at {hex(idx)}: {binascii.hexlify(pointer_bytes)} (little-endian: {hex(pointer_little)}, big-endian: {hex(pointer_big)})")
             
             pointer = pointer_little
             text_offset = text_base + pointer
-            #print(f"Card {card_id} description pointer: {hex(pointer)}, calculated text offset: {hex(text_offset)})")
+            #print(f"Card {card_id}: Pointer offset = {hex(idx)}, Text offset = {hex(text_offset)}")
             
             desc = ""
             i = 0
             try:
-                if slus_data[text_offset:text_offset + 3] == bytes([0xF8, slus_data[text_offset + 1], slus_data[text_offset + 2]]):
-                    i = 3
                 while i < max_length:
+                    if text_offset + i >= len(slus_data):
+                        break
                     byte = slus_data[text_offset + i]
                     if byte == 0xFF:
                         #print(f"Found FF terminator at {hex(text_offset + i)} for card {card_id} description")
                         break
-                    if byte == 0xF8:  # Ignore F8 bytes
-                        i += 1
+                    # Special conversions before skipping
+                    if byte == 0xF8 and (i + 7) < max_length and text_offset + i + 7 < len(slus_data):
+                        seq = slus_data[text_offset + i:text_offset + i + 8]
+                        # Match the longer sequence: F8 0B FC 4C F8 0B D5 FE F8 0B FC 5B F8 0B D F8 0B FC 4C F8 0B D5 FE F8 0B FC 5B F8 0B D
+                        # Handle "Increase the power of" sequence (length 15)
+                        if seq[:15] == bytes([0xF8, 0x0B, 0xFC, 0x4C, 0xF8, 0x0B, 0xD5, 0xFE, 0xF8, 0x0B, 0xFC, 0x5B, 0xF8, 0x0B, 0xD5]):
+                            desc += "Increase the power of "
+                            i += 15
+                            continue
+                        # Handle "when Summoned" sequence (length 20)
+                        elif seq[:20] == bytes([0xF8, 0x0A, 0x01, 0x00, 0x41, 0x38, 0x38, 0xF8, 0x0A, 0x00, 0x00, 0xFE, 0xF8, 0x0B, 0xFC, 0xF8, 0x0B, 0xD0, 0xF8, 0x0B, 0xD4]):
+                            desc += "when summoned"
+                            i += 20
+                            continue
+                    if byte in (0xF8, 0xD5, 0xFC) and i + 1 < max_length and text_offset + i + 1 < len(slus_data):
+                        # Skip remaining control codes and next byte (parameter)
+                        i += 2
                         continue
                     if byte == 0xFE:
                         prev_byte = slus_data[text_offset + i - 1] if i > 0 else 0x00
@@ -403,13 +768,30 @@ class YGOISOPatcher:
                             desc += " "
                         i += 1
                         continue
-                    # Special case: convert ?[0xfc]?[0x71]?[0xd5] to "for each"
-                    if byte == 0xFC and (i + 2) < max_length:
+                    # Special case for liNUMBERl, leWORDl, loPHRASEl after F8 conversions
+                    if byte == 0xFC and (i + 2) < max_length and text_offset + i + 2 < len(slus_data):
                         next1 = slus_data[text_offset + i + 1]
                         next2 = slus_data[text_offset + i + 2]
-                        if next1 == 0x71 and next2 == 0xD5:
-                            desc += "for each"
-                            i += 3
+                        if next1 == 0xD5:
+                            j = i + 3
+                            buffer = ""
+                            while j < max_length and text_offset + j < len(slus_data):
+                                next_byte = slus_data[text_offset + j]
+                                if next_byte == 0x6C:  # 'l' character
+                                    if buffer.startswith("li") and buffer[2:].isdigit():
+                                        desc += buffer[2:-1]  # Number from liNUMBERl
+                                    elif buffer.startswith("le") and buffer[2:-1].isalpha():
+                                        desc += buffer[2:-1]  # Word from leWORDl
+                                    elif buffer.startswith("lo") and buffer[2:-1]:
+                                        desc += buffer[2:-1]  # Phrase from loPHRASEl
+                                    i = j + 1
+                                    break
+                                char = self.char_map.get(next_byte, f"?[{hex(next_byte)}]")
+                                buffer += char
+                                j += 1
+                            if i == j:  # No 'l' found, revert
+                                i += 3
+                                continue
                             continue
                     char = self.char_map.get(byte, f"?[{hex(byte)}]")
                     desc += char
@@ -421,13 +803,13 @@ class YGOISOPatcher:
                 pointer_offset += 2
                 continue
             
+            # Post-process corrections
+            desc = desc.replace("388", "300")  # Correct data error
+            desc = desc.replace("bye", "by")   # Fix mapping misread
             desc = desc.strip() if desc else f"Unknown_{card_id}"
             self.card_descriptions[card_id] = desc
-            # Commented out debug lines as requested
-            # print(f"Card 722 description pointer bytes at 0x1b0fa2: b'f6cd' (little-endian: 0xcdf6, big-endian: 0xf6cd)")
-            # print(f"Card 722 description: Ceremony conducted?[0xfe]to summon the God?[0xfe]Creator of Light.?[0xfe]Sacrifice required. at text offset 0x1bd5f6, bytes: b'2b0108010e040611000f04060c0d0f02010cfe020400070d0e0e0406000209010029040cfe2b080103020408000413002a051009020bfe1d030f080513050f01000801370d0508010c0b'")
-            #if card_id in [1, 2, 3, 4, 5, 16, 17, 18, 19, 20, 21, 35, 167, 216, 237, 311, 323, 335, 336, 340, 349, 363, 433, 551, 558, 591, 665, 666, 677, 681, 682, 688, 674, 721]:
-            #    print(f"Card {card_id} description: {desc} at text offset {hex(text_offset)}, bytes: {binascii.hexlify(slus_data[text_offset:text_offset + i] if text_offset + i <= len(slus_data) else b'offset exceeds SLUS')}")
+            print(f"Card {card_id}: {desc}")
+
             card_id += 1
             pointer_offset += 2
 
@@ -534,73 +916,49 @@ class YGOISOPatcher:
             traceback.print_exc()
 
     def show_patch_interface(self):
-        """Display the patching interface in a new window."""
         if not self.iso_path:
             messagebox.showerror("Error", "Please select an ISO file first.")
             return
-
+    
         patch_window = tk.Toplevel(self.root)
         patch_window.title("Patch ISO")
-        patch_window.geometry("400x400")
-
-        tk.Label(patch_window, text="Select Patches to Apply:", font=("Arial", 12, "bold")).pack(pady=10)
-
+        patch_window.geometry("400x500")
+    
+        # Drop rate selection
+        tk.Label(patch_window, text="Select Drop Rate:", font=("Arial", 10, "bold")).pack(pady=10)
+        self.drop_rate_var = tk.StringVar(value="100")  # Default to 100
+        drop_rate_frame = tk.Frame(patch_window)
+        drop_rate_frame.pack(pady=5)
+        tk.Radiobutton(drop_rate_frame, text="100 Drops", variable=self.drop_rate_var, value="100").pack(side=tk.LEFT, padx=5)
+        tk.Radiobutton(drop_rate_frame, text="1000 Drops", variable=self.drop_rate_var, value="1000").pack(side=tk.LEFT, padx=5)
+    
+        # Patch selection checkboxes
+        tk.Label(patch_window, text="Select Patches to Apply:", font=("Arial", 10, "bold")).pack(pady=10)
         self.patch_vars = {}
         patches = [
-            ("Drop Data Modifier", "drop_modifier"),
-            ("Exodia S-TEC Win", "exodia_stec"),
+            ("Drop Rate", "drop_rate"),
+            ("Exodia S-Tec", "exodia"),
             ("No Password Limit", "password"),
-            ("Convert Repeatable Cards to Starchips", "convert_cards"),
-            ("Remove Win Limiter", "win_limiter"),
+            ("Starchips", "starchips"),
+            ("Win Requirements", "win_requirements"),
         ]
-
         for patch_name, patch_key in patches:
             self.patch_vars[patch_key] = tk.BooleanVar()
             frame = tk.Frame(patch_window)
             frame.pack(fill=tk.X, padx=10)
             tk.Checkbutton(frame, text=f"Enable {patch_name}", variable=self.patch_vars[patch_key]).pack(side=tk.LEFT)
             tk.Checkbutton(frame, text=f"Disable {patch_name}", variable=self.patch_vars[patch_key], onvalue=False, offvalue=True).pack(side=tk.LEFT)
-
-        apply_button = tk.Button(patch_window, text="Apply Patches", command=self.apply_patches, bg="green", fg="white")
-        apply_button.pack(pady=20)
+    
+        # Button frame
+        button_frame = tk.Frame(patch_window)
+        button_frame.pack(pady=20)
+        tk.Button(button_frame, text="Check and Patch ISO", command=self.apply_patches, bg="green", fg="white").pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Reverse Patches", command=self.reverse_patches, bg="red", fg="white").pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="View Opponents", command=self.show_view_data_interface, bg="blue", fg="white").pack(side=tk.LEFT, padx=5)
 
     def apply_patches(self):
-        """Apply the selected patches to the ISO."""
         self.applied_patches.clear()
-        try:
-            if self.patch_vars['drop_modifier'].get():
-                self.apply_drop_modifier_patch()
-            if self.patch_vars['exodia_stec'].get():
-                self.apply_exodia_stec_patch()
-            if self.patch_vars['password'].get():
-                self.apply_password_patch()
-            if self.patch_vars['convert_cards'].get():
-                self.apply_convert_cards_patch()
-            if self.patch_vars['win_limiter'].get():
-                self.apply_win_limiter_patch()
-
-            if self.applied_patches:
-                messagebox.showinfo("Success", f"Applied patches: {', '.join(self.applied_patches)}")
-            else:
-                messagebox.showinfo("Info", "No patches applied.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to patch ISO: {e}")
-            traceback.print_exc()
-
-    def apply_drop_modifier_patch(self):
-        self.applied_patches.append("Drop Data Modifier")
-
-    def apply_exodia_stec_patch(self):
-        self.applied_patches.append("Exodia S-TEC Win")
-
-    def apply_password_patch(self):
-        self.applied_patches.append("No Password Limit")
-
-    def apply_convert_cards_patch(self):
-        self.applied_patches.append("Convert Repeatable Cards to Starchips")
-
-    def apply_win_limiter_patch(self):
-        self.applied_patches.append("Remove Win Limiter")
+        self.check_and_patch_iso()  # Delegate to the full method
 
     def show_view_data_interface(self):
         """Display the data viewing interface in a new window."""
@@ -847,7 +1205,7 @@ class YGOISOPatcher:
         expected_opponents = 40
         max_length = 50
 
-        print(f"Loading opponent names using pointer table at {hex(pointer_base)}")
+        #print(f"Loading opponent names using pointer table at {hex(pointer_base)}")
         temp_opponents = []
 
         for opponent_id in range(expected_opponents):
@@ -958,60 +1316,6 @@ class YGOISOPatcher:
             messagebox.showerror("Error", f"Failed to load opponent data: {e}")
             traceback.print_exc()
     
-    def precompute_card_droppers(self):
-        """Precompute which opponents drop each card for reverse lookup."""
-        self.card_droppers.clear()
-        for card_id in range(1, self.total_cards + 1):
-            self.card_droppers[card_id] = {"sa_pow": [], "bcd": [], "sa_tec": []}
-
-        try:
-            with open(self.wamrg_path, 'rb') as f:
-                file_size = os.path.getsize(self.wamrg_path)
-                for opponent_id in range(len(self.opponents)):  # Include all opponents (0 to len-1)
-                    opponent_name = self.opponents[opponent_id]
-                    base_offset = 0xE99800 + (opponent_id * self.opponent_block_size)
-
-                    # S/A POW Drops
-                    f.seek(base_offset + self.wamrg_offsets["sa_pow_drops"])
-                    expected_size = self.total_cards * 2  # 2 bytes per card
-                    sa_pow_data = f.read(expected_size)
-                    actual_size = len(sa_pow_data)
-                    if actual_size < expected_size:
-                        print(f"Warning: S/A POW data for opponent {opponent_id} truncated to {actual_size} bytes, expected {expected_size}")
-                    sa_pow_chances = self.parse_drop_chances(sa_pow_data, "sa_pow")
-                    for card_id, chance in sa_pow_chances.items():
-                        self.card_droppers[card_id]["sa_pow"].append((opponent_name, chance))
-
-                    # B/C/D Drops
-                    f.seek(base_offset + self.wamrg_offsets["bcd_drops"])
-                    bcd_data = f.read(expected_size)
-                    actual_size = len(bcd_data)
-                    if actual_size < expected_size:
-                        print(f"Warning: B/C/D data for opponent {opponent_id} truncated to {actual_size} bytes, expected {expected_size}")
-                    bcd_chances = self.parse_drop_chances(bcd_data, "bcd")
-                    for card_id, chance in bcd_chances.items():
-                        self.card_droppers[card_id]["bcd"].append((opponent_name, chance))
-
-                    # S/A TEC Drops
-                    f.seek(base_offset + self.wamrg_offsets["sa_tec_drops"])
-                    sa_tec_data = f.read(expected_size)
-                    actual_size = len(sa_tec_data)
-                    if actual_size < expected_size:
-                        print(f"Warning: S/A TEC data for opponent {opponent_id} truncated to {actual_size} bytes, expected {expected_size}")
-                    sa_tec_chances = self.parse_drop_chances(sa_tec_data, "sa_tec")
-                    for card_id, chance in sa_tec_chances.items():
-                        self.card_droppers[card_id]["sa_tec"].append((opponent_name, chance))
-
-                    # Debug for last opponent
-                    if opponent_id == len(self.opponents) - 1:
-                        print(f"Last opponent {opponent_id} ({opponent_name}) raw data lengths:")
-                        print(f"  S/A POW: {len(sa_pow_data)} bytes, data: {binascii.hexlify(sa_pow_data)}")
-                        print(f"  B/C/D: {len(bcd_data)} bytes, data: {binascii.hexlify(bcd_data)}")
-                        print(f"  S/A TEC: {len(sa_tec_data)} bytes, data: {binascii.hexlify(sa_tec_data)}")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to precompute card droppers: {e}")
-            traceback.print_exc()
 
     def load_all_cards_view(self):
         """Load and display all cards in the Treeview table with view-specific search."""
@@ -1024,6 +1328,55 @@ class YGOISOPatcher:
 
         # Insert all cards based on view-specific search
         self.filter_treeview(self.all_cards_tree, self.search_terms["all_cards"], "all_cards")
+
+    def reverse_lookup_equips(self, wamrg_path): #this is a function to show which equips a card can use
+        """Reverse lookup to find all equips a monster (card) can use based on equip data."""
+        equip_offsets = {
+            0: (0xB85000, 0xB87800),  # No Field
+            1: (0xBFA800, 0xBFD000),  # Forest Field
+            2: (0xC70000, 0xC72800),  # Wasteland Field
+            3: (0xCE5800, 0xCE8000),  # Mountain Field
+            4: (0xD5B000, 0xD5D800),  # Sogen Field
+            5: (0xDD0800, 0xDD3000),  # Umi Field
+            6: (0xE46000, 0xE48800)   # Yami Field
+        }
+        card_to_equips = {}  # Map card ID to list of (equip_id, equip_name) tuples
+
+        try:
+            with open(wamrg_path, 'rb') as f:
+                for field_type, (start_offset, end_offset) in equip_offsets.items():
+                    current_offset = start_offset
+                    while current_offset < end_offset:
+                        f.seek(current_offset)
+                        # Read equip card ID (2 bytes)
+                        equip_id = int.from_bytes(f.read(2), 'little')
+                        if equip_id == 0:
+                            break  # End of equip data for this field
+                        # Read total number of cards (2 bytes)
+                        total_cards = int.from_bytes(f.read(2), 'little')
+                        # Read the list of material card IDs
+                        material_cards = []
+                        for _ in range(total_cards):
+                            card_id = int.from_bytes(f.read(2), 'little')
+                            if card_id != 0:  # Skip null entries
+                                material_cards.append(card_id)
+                            current_offset += 2
+                        current_offset += 4  # Move past equip_id and total_cards
+
+                        # Update reverse lookup with names
+                        equip_name = self.card_names.get(equip_id, f"Unknown_{equip_id}")
+                        for card_id in material_cards:
+                            if card_id not in card_to_equips:
+                                card_to_equips[card_id] = []
+                            if (equip_id, equip_name) not in card_to_equips[card_id]:
+                                card_to_equips[card_id].append((equip_id, equip_name))
+
+            return card_to_equips
+
+        except Exception as e:
+            print(f"Error processing equip data: {e}")
+            return {}
+
 
     def update_treeview(self, tree, chances, data_type):
         """Update the Treeview with the given data and view-specific search."""
@@ -1061,6 +1414,16 @@ class YGOISOPatcher:
         bcd_droppers = "\n".join([f"{opp}: {chance}/2048" for opp, chance in droppers["bcd"]]) or "None"
         sa_tec_droppers = "\n".join([f"{opp}: {chance}/2048" for opp, chance in droppers["sa_tec"]]) or "None"
 
+        #Get equipable cards for this card
+        compatible_equips = self.card_to_equips.get(card_id, [])
+        if compatible_equips:
+            equip_list = ", ".join(f"{equip_id} ({equip_name})" for equip_id, equip_name in compatible_equips
+        ) 
+        else:
+            equip_list = "None"
+
+
+
         info_text = (
             f"Card ID: {card_id}\n"
             f"Name: {card_name}\n"
@@ -1076,6 +1439,7 @@ class YGOISOPatcher:
             f"Dropped by (S/A POW):\n{sa_pow_droppers}\n\n"
             f"Dropped by (B/C/D):\n{bcd_droppers}\n\n"
             f"Dropped by (S/A TEC):\n{sa_tec_droppers}\n"
+            f"Equipable Cards: {equip_list}\n"
         )
 
         self.card_info_text.delete(1.0, tk.END)
